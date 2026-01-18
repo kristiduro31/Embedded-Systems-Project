@@ -44,7 +44,8 @@ cmake -GNinja -B ../iree-build/ \
   -DCMAKE_CXX_COMPILER=clang++ \
   -DCMAKE_INSTALL_PREFIX=../iree-build/install \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo .
-cmake --build ../iree-build/ --target install
+# Note: If memory errors occur, use '-j 1' instead of '-j 4'
+cmake --build ../iree-build/ --target install -- -j 4
 
 # 5. Build Target Runtime (iree-run-module for RISC-V)
 export RISCV_TOOLCHAIN_ROOT=$HOME/riscv/toolchain/clang/linux/RISCV

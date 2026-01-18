@@ -10,9 +10,37 @@ set -e
 apt-get update && apt-get install -y git cmake ninja-build clang lld \
     python3 python3-pip wget sudo time bc libglib2.0-0 libpixman-1-0 libdw1
 
-git clone https://github.com/iree-org/iree.git
-cd iree
-git submodule update --init --recursive
+# Increase Git buffers and disable compression to handle large submodules
+git config --global http.postBuffer 1048576000
+git config --global http.lowSpeedLimit 0
+git config --global http.lowSpeedTime 999999
+git config --global core.compression 0
+
+# Clone IREE main repo
+if [ ! -d "iree" ]; then
+    git clone https://github.com/iree-org/iree.git
+    cd iree
+else
+    cd iree
+fi
+
+# Robust Submodule Update with Retries
+MAX_RETRIES=5
+COUNT=0
+until [ $COUNT -ge $MAX_RETRIES ]
+do
+    echo "Submodule update attempt $((COUNT+1))..."
+    # Using --depth 1 is critical to minimize data transfer for the llvm-project
+    git submodule update --init --recursive --depth 1 && break
+    COUNT=$((COUNT+1))
+    echo "Clone failed. Sleeping 10s and retrying..."
+    sleep 10
+done
+
+if [ $COUNT -eq $MAX_RETRIES ]; then
+    echo "Failed to clone submodules after $MAX_RETRIES attempts. Check your internet."
+    exit 1
+fi
 
 ./build_tools/riscv/riscv_bootstrap.sh
 
@@ -21,7 +49,7 @@ cmake -GNinja -B ../iree-build/ \
   -DCMAKE_CXX_COMPILER=clang++ \
   -DCMAKE_INSTALL_PREFIX=../iree-build/install \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo .
-cmake --build ../iree-build/ --target install
+cmake --build ../iree-build/ --target install -- -j 1
 
 export RISCV_TOOLCHAIN_ROOT=$HOME/riscv/toolchain/clang/linux/RISCV
 cmake -GNinja -B ../iree-build-riscv/ \
