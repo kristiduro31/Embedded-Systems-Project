@@ -142,7 +142,11 @@ chmod +x run_suite.sh
 
 ![AlexNet Architecture](images/alexnet.jpg)
 
-Architecture: The pioneer of deep CNNs, featuring a simple linear topology with large convolution kernels (11×11, 5×5) and strided access patterns. Observed Result: 0 Vector Instructions. Despite enabling RVV flags, the compiler failed to auto-vectorize this model. This is due to the large kernels and strides, which the current LLVM RISC-V backend prefers to lower into scalar code. We use a PyTorch export here because the official ONNX Model Zoo link is currently broken.
+**Architecture**: The pioneer of deep CNNs, featuring a simple linear topology with large convolution kernels (11×11, 5×5) and strided access patterns. 
+
+**Observed Result**: 0 Vector Instructions. 
+
+Despite enabling RVV flags, the compiler failed to auto-vectorize this model. This is due to the large kernels and strides, which the current LLVM RISC-V backend prefers to lower into scalar code. We use a PyTorch export here because the official ONNX Model Zoo link is currently broken.
 
 ```bash
 # 1. Export
@@ -166,7 +170,11 @@ iree-import-onnx alexnet.onnx -o alexnet.mlir
 
 ![CaffeNet Architecture](images/caffenet.png)
 
-Architecture: A variation of AlexNet with minor changes to layer ordering (pooling before normalization). Observed Result: 0 Vector Instructions. Since the architecture is structurally identical to AlexNet regarding convolution patterns, it suffers from the same lack of auto-vectorization. We reuse the AlexNet ONNX file to ensure consistency and avoid legacy download errors.
+**Architecture**: A variation of AlexNet with minor changes to layer ordering (pooling before normalization). 
+
+**Observed Result**: 0 Vector Instructions. 
+
+Since the architecture is structurally identical to AlexNet regarding convolution patterns, it suffers from the same lack of auto-vectorization. We reuse the AlexNet ONNX file to ensure consistency and avoid legacy download errors.
 
 ```bash
 # 1. Setup
@@ -189,7 +197,11 @@ iree-import-onnx caffenet.onnx -o caffenet.mlir
 
 ![MobileNetV2 Architecture](images/mobilenetv2.png)
 
-Architecture: Optimized for edge efficiency using Inverted Residuals and Depthwise Separable Convolutions. Observed Result: Success (~307,000 Vector Instructions). The compiler successfully identified vectorizable loops in the pointwise (1×1) convolutions, lowering them to RISC-V vector operations. Performance Note: The high vector execution time (~104s) vs scalar (~10s) is due to QEMU emulation overhead for 512-bit vector operations, confirming heavy usage of the vector unit.
+**Architecture**: Optimized for edge efficiency using Inverted Residuals and Depthwise Separable Convolutions.
+
+**Observed Result**: Success (~307,000 Vector Instructions).  
+
+The compiler successfully identified vectorizable loops in the pointwise (1×1) convolutions, lowering them to RISC-V vector operations. Performance Note: The high vector execution time (~104s) vs scalar (~10s) is due to QEMU emulation overhead for 512-bit vector operations, confirming heavy usage of the vector unit.
 
 ```bash
 # 1. Download & Upgrade
@@ -213,7 +225,11 @@ iree-import-onnx mobilenet_v17.onnx -o mobilenet.mlir
 
 ![SqueezeNet Architecture](images/squeezenet.png)
 
-Architecture: A compact CNN that replaces standard convolutions with Fire Modules (squeeze 1×1 and expand 1×1/3×3) to reduce parameter count. Observed Result: Success (~286,000 Vector Instructions). The compiler successfully lowered the 1×1 convolutions in the Fire Modules into vector operations. Similar to MobileNet, the execution time increase in Vector mode (~100s) compared to Scalar (~8s) confirms that QEMU was actively emulating complex vector instructions.
+**Architecture**: A compact CNN that replaces standard convolutions with Fire Modules (squeeze 1×1 and expand 1×1/3×3) to reduce parameter count. 
+
+**Observed Result**: Success (~286,000 Vector Instructions). 
+
+The compiler successfully lowered the 1×1 convolutions in the Fire Modules into vector operations. Similar to MobileNet, the execution time increase in Vector mode (~100s) compared to Scalar (~8s) confirms that QEMU was actively emulating complex vector instructions.
 
 ```bash
 # 1. Download & Upgrade
@@ -237,7 +253,11 @@ iree-import-onnx squeezenet_v17.onnx -o squeezenet.mlir
 
 ![InceptionV1 Architecture](images/googlenet.png)
 
-Architecture: Introduces the Inception Module, computing convolutions with multiple kernel sizes (1×1,3×3,5×5) in parallel branches. Observed Result: 0 Vector Instructions. The complex control flow resulting from branching and concatenation, combined with small kernel sizes, prevents efficient auto-vectorization. We use a PyTorch export because the official ONNX model uses attributes incompatible with the current upgrade script.
+**Architecture**: Introduces the Inception Module, computing convolutions with multiple kernel sizes (1×1,3×3,5×5) in parallel branches. 
+
+**Observed Result**: 0 Vector Instructions. 
+
+The complex control flow resulting from branching and concatenation, combined with small kernel sizes, prevents efficient auto-vectorization. We use a PyTorch export because the official ONNX model uses attributes incompatible with the current upgrade script.
 
 ```bash
 # 1. Export from PyTorch (Guaranteed)
@@ -259,7 +279,11 @@ iree-import-onnx googlenet.onnx -o googlenet.mlir
 
 ![NiN Architecture](images/NiN.png)
 
-Architecture: The bridge between legacy CNNs and modern architectures. It introduced the "Mlpconv" structure (a spatial convolution followed by two 1x1 convolutions). Observed Result: 0 Vector Instructions (Failed). Analysis: While NiN contains 1x1 convolutions (usually vector-friendly), it failed to vectorize. Comparing this with SqueezeNet (which succeeded), the culprit is the input layer: 11x11 Kernel with Stride 4. The compiler lowers this sparse, large-window operation to scalar code, blocking optimization for the subsequent layers.
+**Architecture**: The bridge between legacy CNNs and modern architectures. It introduced the "Mlpconv" structure (a spatial convolution followed by two 1x1 convolutions). 
+
+**Observed Result**: 0 Vector Instructions (Failed). 
+
+While NiN contains 1x1 convolutions (usually vector-friendly), it failed to vectorize. Comparing this with SqueezeNet (which succeeded), the culprit is the input layer: 11x11 Kernel with Stride 4. The compiler lowers this sparse, large-window operation to scalar code, blocking optimization for the subsequent layers.
 
 Implementation Note: Since official ONNX Model Zoo links are deprecated and modern libraries (like Torchvision) do not host pre-trained weights for this legacy architecture, we define the canonical ImageNet architecture manually in PyTorch below to ensure compatibility with Opset 17.
 
@@ -320,7 +344,11 @@ iree-import-onnx nin.onnx -o nin.mlir
 
 ![TinyBERT Transformer Architecture](images/bert.png)
 
-Architecture: A compressed Transformer model relying heavily on Dense Matrix Multiplications (MatMul) for attention mechanisms. Observed Result: Success (~18,000+ Vector Instructions). This model serves as our "Positive Control." The dense MatMul operations map perfectly to the RISC-V Vector extension. Technical Note: A custom script is used below to handle the 3-input requirement (input IDs, masks, token types) and strictly append the results to results.csv.
+**Architecture**: A compressed Transformer model relying heavily on Dense Matrix Multiplications (MatMul) for attention mechanisms. 
+
+**Observed Result**: Success (~18,000+ Vector Instructions). 
+
+This model serves as our "Positive Control." The dense MatMul operations map perfectly to the RISC-V Vector extension. Technical Note: A custom script is used below to handle the 3-input requirement (input IDs, masks, token types) and strictly append the results to results.csv.
 
 ```bash
 cat << 'EOF' > run_tinybert_full.sh
