@@ -1,44 +1,21 @@
-# HW5: ML Compilation and Execution with IREE on RISC-V
-**Embedded Systems Course Project - AY 2025-2026**
+#!/bin/bash
+# run_simulations_and_reproduce_benchmark_suite.sh
 
-Supervisors: Prof. Davide Zoni, Dr. Andrea Galimberti, Adriano Guarisco
+set -e
 
-This project compiles and profiles Machine Learning models (AlexNet, CaffeNet, MobileNet, GoogleNet InceptionV1, NiN, TinyBERT) on RISC-V architecture using IREE. It benchmarks performance differences between **Scalar** (Baseline) and **Vector** (Optimized) implementations using QEMU.
+# ============================================================
+# 1. Install Dependencies & Build IREE
+# ============================================================
 
-> **Note on Reproducibility**  
-> This repository includes two optional automation scripts located in the `scripts` folder (`setup_iree_riscv_container.sh` and `run_simulations_and_reproduce_benchmark_suite.sh`) that reproduce the full experimental pipeline end-to-end.  
-> These scripts require a working Docker installation and must be launched from the **host machine terminal**, starting with `setup_iree_riscv_container.sh`, which initializes the containerized environment.  
-> Nevertheless, the **manual execution procedure documented below is the recommended reference**, as it exposes each compilation, execution, and benchmarking step in a transparent and verifiable manner!
-
-
-## 1. Environment Setup (Mac M-Series)
-Since the project relies on x86 Linux binaries, we use Docker with platform emulation.
-
-```bash
-# 1. Create workspace
-mkdir -p ~/polimi/hw5
-cd ~/polimi/hw5
-
-# 2. Launch x86 Emulation Container
-docker run --platform linux/amd64 -it -v $(pwd):/work -w /work ubuntu:22.04 /bin/bash
-```
-
-## 2. Install Dependencies & Build IREE
-
-```bash
-# 1. Install System Tools
 apt-get update && apt-get install -y git cmake ninja-build clang lld \
     python3 python3-pip wget sudo time bc libglib2.0-0 libpixman-1-0 libdw1
 
-# 2. Clone IREE
-git clone [https://github.com/iree-org/iree.git](https://github.com/iree-org/iree.git)
+git clone https://github.com/iree-org/iree.git
 cd iree
 git submodule update --init --recursive
 
-# 3. Download RISC-V Toolchain (Clang + QEMU)
 ./build_tools/riscv/riscv_bootstrap.sh
 
-# 4. Build Host Compiler (iree-compile)
 cmake -GNinja -B ../iree-build/ \
   -DCMAKE_C_COMPILER=clang \
   -DCMAKE_CXX_COMPILER=clang++ \
@@ -46,7 +23,6 @@ cmake -GNinja -B ../iree-build/ \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo .
 cmake --build ../iree-build/ --target install
 
-# 5. Build Target Runtime (iree-run-module for RISC-V)
 export RISCV_TOOLCHAIN_ROOT=$HOME/riscv/toolchain/clang/linux/RISCV
 cmake -GNinja -B ../iree-build-riscv/ \
   -DCMAKE_TOOLCHAIN_FILE="./build_tools/cmake/riscv.toolchain.cmake" \
@@ -56,17 +32,14 @@ cmake -GNinja -B ../iree-build-riscv/ \
   -DRISCV_TOOLCHAIN_ROOT=${RISCV_TOOLCHAIN_ROOT} .
 cmake --build ../iree-build-riscv/
 
-# 6. Install Python Bindings
-python3 -m pip install iree-base-compiler[onnx] iree-base-runtime numpy onnx
-```
+cd /work
 
-## 3. Setup Helper Scripts
+python3 -m pip install iree-base-compiler[onnx] iree-base-runtime numpy onnx torch torchvision pandas matplotlib
 
+# ============================================================
+# 2. Helper Scripts
+# ============================================================
 
-A. Create upgrade_model.py
-Fixes old ONNX models to Opset 17.
-
-```bash
 cat << 'EOF' > upgrade_model.py
 import sys
 import onnx
@@ -82,12 +55,7 @@ onnx.checker.check_model(converted_model)
 onnx.save(converted_model, output_path)
 print(f"Saved to {output_path}")
 EOF
-```
 
-B. Create run_suite.sh
-Benchmarks Time, Memory, and Vector Instruction Utilization.
-
-```bash
 cat << 'EOF' > run_suite.sh
 #!/bin/bash
 MODEL_NAME=$1
@@ -107,7 +75,6 @@ run_test() {
     TYPE=$1
     VMFB_FILE="${MODEL_NAME}_${TYPE}.vmfb"
     
-    # Phase 1: Benchmark Time & RAM
     /usr/bin/time -v -o mem_log.txt $QEMU_BIN \
         -cpu rv64,Zve64d=true,vlen=512,elen=64,vext_spec=v1.0 \
         -L $RISCV_SYSROOT \
@@ -121,7 +88,6 @@ run_test() {
     TIME_MS=$(cat bench_log.txt | grep "BM_main/process_time/real_time" | awk '{print $2}')
     MEM_KB=$(cat mem_log.txt | grep "Maximum resident set size" | awk '{print $6}')
 
-    # Phase 2: Count Instructions
     VEC_COUNT=$($QEMU_BIN \
         -cpu rv64,Zve64d=true,vlen=512,elen=64,vext_spec=v1.0 \
         -d in_asm \
@@ -140,160 +106,95 @@ run_test "scalar"
 run_test "vector"
 EOF
 chmod +x run_suite.sh
-```
 
-## 4. Experimental Evaluation & Model Benchmarking
+# ============================================================
+# 3. Models
+# ============================================================
 
-1. AlexNet
 
-![AlexNet Architecture](images/alexnet.jpg)
+# AlexNet
+python3 -c "import torch; import torchvision; dummy = torch.randn(1,3,224,224); model = torchvision.models.alexnet(weights='DEFAULT').eval(); torch.onnx.export(model, dummy, 'alexnet.onnx', opset_version=17)"
 
-**Architecture**: The pioneer of deep CNNs, featuring a simple linear topology with large convolution kernels (11×11, 5×5) and strided access patterns. 
-
-**Observed Result**: 0 Vector Instructions. 
-
-Despite enabling RVV flags, the compiler failed to auto-vectorize this model. This is due to the large kernels and strides, which the current LLVM RISC-V backend prefers to lower into scalar code. We use a PyTorch export here because the official ONNX Model Zoo link is currently broken.
-
-```bash
-# 1. Export
-python3 -c "import torch; import torchvision; dummy = torch.randn(1, 3, 224, 224); model = torchvision.models.alexnet(weights='DEFAULT').eval(); torch.onnx.export(model, dummy, 'alexnet.onnx', opset_version=17)"
-
-# 2. Compile
 iree-import-onnx alexnet.onnx -o alexnet.mlir
 
-# Scalar
-../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d" alexnet.mlir -o alexnet_scalar.vmfb
+../iree-build/install/bin/iree-compile --iree-hal-target-device=local \
+ --iree-hal-local-target-device-backends=llvm-cpu \
+ --iree-llvmcpu-target-triple=riscv64 \
+ --iree-llvmcpu-target-abi=lp64d \
+ --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d" \
+ alexnet.mlir -o alexnet_scalar.vmfb
 
-# Vector
-../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" --riscv-v-fixed-length-vector-lmul-max=8 alexnet.mlir -o alexnet_vector.vmfb
+../iree-build/install/bin/iree-compile --iree-hal-target-device=local \
+ --iree-hal-local-target-device-backends=llvm-cpu \
+ --iree-llvmcpu-target-triple=riscv64 \
+ --iree-llvmcpu-target-abi=lp64d \
+ --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" \
+ --riscv-v-fixed-length-vector-lmul-max=8 \
+ alexnet.mlir -o alexnet_vector.vmfb
 
-# 3. Run
 ./run_suite.sh alexnet 1x3x224x224xf32
-```
 
 
-2. CaffeNet
-
-![CaffeNet Architecture](images/caffenet.png)
-
-**Architecture**: A variation of AlexNet with minor changes to layer ordering (pooling before normalization). 
-
-**Observed Result**: 0 Vector Instructions. 
-
-Since the architecture is structurally identical to AlexNet regarding convolution patterns, it suffers from the same lack of auto-vectorization. We reuse the AlexNet ONNX file to ensure consistency and avoid legacy download errors.
-
-```bash
-# 1. Setup
+# CaffeNet
 cp alexnet.onnx caffenet.onnx
-
-# 2. Compile
 iree-import-onnx caffenet.onnx -o caffenet.mlir
 
-# Scalar
-../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d" caffenet.mlir -o caffenet_scalar.vmfb
+../iree-build/install/bin/iree-compile --iree-hal-target-device=local \
+ --iree-hal-local-target-device-backends=llvm-cpu \
+ --iree-llvmcpu-target-triple=riscv64 \
+ --iree-llvmcpu-target-abi=lp64d \
+ --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d" \
+ caffenet.mlir -o caffenet_scalar.vmfb
 
-# Vector
-../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" --riscv-v-fixed-length-vector-lmul-max=8 caffenet.mlir -o caffenet_vector.vmfb
+../iree-build/install/bin/iree-compile --iree-hal-target-device=local \
+ --iree-hal-local-target-device-backends=llvm-cpu \
+ --iree-llvmcpu-target-triple=riscv64 \
+ --iree-llvmcpu-target-abi=lp64d \
+ --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" \
+ --riscv-v-fixed-length-vector-lmul-max=8 \
+ caffenet.mlir -o caffenet_vector.vmfb
 
-# 3. Run
 ./run_suite.sh caffenet 1x3x224x224xf32
-```
 
-3. MobileNet V2
 
-![MobileNetV2 Architecture](images/mobilenetv2.png)
-
-**Architecture**: Optimized for edge efficiency using Inverted Residuals and Depthwise Separable Convolutions.
-
-**Observed Result**: Success (~307,000 Vector Instructions).  
-
-The compiler successfully identified vectorizable loops in the pointwise (1×1) convolutions, lowering them to RISC-V vector operations. Performance Note: The high vector execution time (~104s) vs scalar (~10s) is due to QEMU emulation overhead for 512-bit vector operations, confirming heavy usage of the vector unit.
-
-```bash
-# 1. Download & Upgrade
+# MobileNet
 wget https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-7.onnx -O mobilenet.onnx
 python3 upgrade_model.py mobilenet.onnx mobilenet_v17.onnx
 
-# 2. Compile
 iree-import-onnx mobilenet_v17.onnx -o mobilenet.mlir
 
-# Scalar
 ../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d" mobilenet.mlir -o mobilenet_scalar.vmfb
 
-# Vector
 ../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" --riscv-v-fixed-length-vector-lmul-max=8 mobilenet.mlir -o mobilenet_vector.vmfb
 
-# 3. Run
 ./run_suite.sh mobilenet 1x3x224x224xf32
-```
 
-4. SqueezeNet
 
-![SqueezeNet Architecture](images/squeezenet.png)
-
-**Architecture**: A compact CNN that replaces standard convolutions with Fire Modules (squeeze 1×1 and expand 1×1/3×3) to reduce parameter count. 
-
-**Observed Result**: Success (~286,000 Vector Instructions). 
-
-The compiler successfully lowered the 1×1 convolutions in the Fire Modules into vector operations. Similar to MobileNet, the execution time increase in Vector mode (~100s) compared to Scalar (~8s) confirms that QEMU was actively emulating complex vector instructions.
-
-```bash
-# 1. Download & Upgrade
+# SqueezeNet 
 wget https://github.com/onnx/models/raw/main/validated/vision/classification/squeezenet/model/squeezenet1.1-7.onnx -O squeezenet.onnx
 python3 upgrade_model.py squeezenet.onnx squeezenet_v17.onnx
 
-# 2. Compile
 iree-import-onnx squeezenet_v17.onnx -o squeezenet.mlir
 
-# Scalar
 ../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d" squeezenet.mlir -o squeezenet_scalar.vmfb
 
-# Vector
 ../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" --riscv-v-fixed-length-vector-lmul-max=8 squeezenet.mlir -o squeezenet_vector.vmfb
 
-# 3. Run
 ./run_suite.sh squeezenet 1x3x224x224xf32
-```
 
-5. GoogleNet (Inception v1)
 
-![InceptionV1 Architecture](images/googlenet.png)
-
-**Architecture**: Introduces the Inception Module, computing convolutions with multiple kernel sizes (1×1,3×3,5×5) in parallel branches. 
-
-**Observed Result**: 0 Vector Instructions. 
-
-The complex control flow resulting from branching and concatenation, combined with small kernel sizes, prevents efficient auto-vectorization. We use a PyTorch export because the official ONNX model uses attributes incompatible with the current upgrade script.
-
-```bash
-# 1. Export from PyTorch (Guaranteed)
-# We export directly to Opset 17, so no upgrade script is needed.
+# GoogleNet
 python3 -c "import torch; import torchvision; dummy = torch.randn(1, 3, 224, 224); model = torchvision.models.googlenet(weights='DEFAULT').eval(); torch.onnx.export(model, dummy, 'googlenet.onnx', opset_version=17)"
-
-# 2. Import & Compile
 iree-import-onnx googlenet.onnx -o googlenet.mlir
 
 ../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d" googlenet.mlir -o googlenet_scalar.vmfb
 
 ../iree-build/install/bin/iree-compile --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu --iree-llvmcpu-target-triple=riscv64 --iree-llvmcpu-target-abi=lp64d --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" --riscv-v-fixed-length-vector-lmul-max=8 googlenet.mlir -o googlenet_vector.vmfb
 
-# 3. Benchmark
 ./run_suite.sh googlenet 1x3x224x224xf32
-```
 
-6. Network in Network (NiN)
 
-![NiN Architecture](images/NiN.png)
-
-**Architecture**: The bridge between legacy CNNs and modern architectures. It introduced the "Mlpconv" structure (a spatial convolution followed by two 1x1 convolutions). 
-
-**Observed Result**: 0 Vector Instructions (Failed). 
-
-While NiN contains 1x1 convolutions (usually vector-friendly), it failed to vectorize. Comparing this with SqueezeNet (which succeeded), the culprit is the input layer: 11x11 Kernel with Stride 4. The compiler lowers this sparse, large-window operation to scalar code, blocking optimization for the subsequent layers.
-
-Implementation Note: Since official ONNX Model Zoo links are deprecated and modern libraries (like Torchvision) do not host pre-trained weights for this legacy architecture, we define the canonical ImageNet architecture manually in PyTorch below to ensure compatibility with Opset 17.
-
-```bash
+# NiN 
 # A. Generate Canonical NiN (Opset 17)
 cat << 'EOF' > export_nin.py
 import torch
@@ -343,20 +244,9 @@ iree-import-onnx nin.onnx -o nin.mlir
 
 # C. Benchmark
 ./run_suite.sh nin 1x3x224x224xf32
-```
 
 
-8. TinyBERT
-
-![TinyBERT Transformer Architecture](images/bert.png)
-
-**Architecture**: A compressed Transformer model relying heavily on Dense Matrix Multiplications (MatMul) for attention mechanisms. 
-
-**Observed Result**: Success (~18,000+ Vector Instructions). 
-
-This model serves as our "Positive Control." The dense MatMul operations map perfectly to the RISC-V Vector extension. Technical Note: A custom script is used below to handle the 3-input requirement (input IDs, masks, token types) and strictly append the results to results.csv.
-
-```bash
+#TinyBERT
 cat << 'EOF' > run_tinybert_full.sh
 #!/bin/bash
 QEMU_BIN="/root/riscv/qemu/linux/RISCV/qemu-riscv64"
@@ -395,11 +285,13 @@ echo "Done."
 EOF
 chmod +x run_tinybert_full.sh
 ./run_tinybert_full.sh
-```
 
-## 5. Post-Processing & Visualization
-Manually `cat results.csv` or by creating the comparision charts between scalar and vectorised instructions simulation runs with `generate_charts.py`.
-```bash
+
+# ============================================================
+# 4. Post-Processing & Visualization
+# ============================================================
+
+cat results.csv
 cat << 'EOF' > generate_charts.py
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -542,6 +434,5 @@ plt.tight_layout()
 plt.savefig('chart_time.png', dpi=300)
 print("Generated chart_time.png")
 EOF
-```
-Run the script to view the results: `python3 generate_charts.py`
 
+python3 generate_charts.py
