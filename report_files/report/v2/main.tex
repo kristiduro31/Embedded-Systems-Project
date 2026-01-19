@@ -1,0 +1,227 @@
+\documentclass[11pt, twocolumn]{article} % Switched to standard twocolumn for better figure placement
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{lipsum}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage[left=2.00cm, right=2.00cm, top=2.00cm, bottom=2.00cm]{geometry}
+\usepackage{hyperref}
+
+% Optional: Makes links clickable but black (professional look)
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    filecolor=magenta,      
+    urlcolor=blue,
+    citecolor=black,
+}
+
+\title{HW5 Report: IREE on RISC-V}
+
+\begin{document}
+
+% --- TITLE & LOGOS (Spanning the full width of the page) ---
+\twocolumn[{%
+    \begin{center}
+        % Direct image placement (no \begin{figure}) fixes the moving logo bug
+        \includegraphics[height=2.5cm]{polimi.png} 
+        \hspace{8.5cm} 
+        \includegraphics[height=2.5cm]{heap.png}
+        
+        \vspace{5mm}
+        
+        {\Large \textbf{HW5: ML Compilation and Execution with IREE on RISC-V}}\\
+        \vspace{2mm}
+        {\Large \textbf{Embedded Systems - AA 2025-2026}}\\
+        \vspace{2mm}
+        {\small Kristi Duro, 273213}\\
+        {\small Supervisors: Prof. Davide Zoni, Dr. Andrea Galimberti, Adriano Guarisco}\\
+        \vspace{5mm}
+    \end{center}
+}]
+
+\section{Introduction}
+The deployment of Deep Learning (DL) models~\cite{lecun2015deep} on embedded architectures requires highly optimized compiler toolchains to bridge the gap between high-level frameworks (like PyTorch or ONNX) and bare-metal hardware. This project explores the \textbf{IREE} (Intermediate Representation Execution Environment) toolchain~\cite{iree_github} targeting the \textbf{RISC-V} Instruction Set Architecture (ISA).
+
+The primary objective is to evaluate the functional correctness and efficiency of the \textbf{RISC-V Vector Extension (RVV)} by comparing scalar (baseline) and vectorized implementations of various neural network architectures. We analyze execution time, memory footprint, and vector instruction utilization across a suite of models including MobileNetV2~\cite{mobilenetv2}, SqueezeNet~\cite{squeezenet}, TinyBERT~\cite{tinybert}, and Network in Network (NiN).
+
+\section{Problem Analysis}
+Compilation for embedded RISC-V targets presents unique challenges compared to standard x86/ARM deployment:
+\begin{enumerate}
+    \item \textbf{Graph Lowering}: Mapping complex operators (e.g., Depthwise Convolution, Self-Attention) to vector primitives requires sophisticated Intermediate Representation (MLIR) transformations.
+    \item \textbf{Auto-Vectorization Heuristics}: The LLVM backend must decide when to vectorize. Architectures with large, irregular kernels (like AlexNet~\cite{alexnet}) often fail heuristic checks, falling back to scalar code.
+    \item \textbf{Resource Constraints}: Embedded devices have strict memory limits~\cite{hw5_spec}. Enabling vectorization often increases binary size and runtime memory overhead, creating a trade-off between performance and footprint.
+\end{enumerate}
+
+\section{Method}
+
+\subsection{Experimental Environment}
+The experiments were conducted on a host machine featuring an \textbf{Apple M3 Pro (ARM64)} processor running macOS. To ensure reproducibility and resolve cross-platform compatibility issues, the entire compilation and execution pipeline was encapsulated within a \textbf{Docker} container running \textbf{Ubuntu 22.04 LTS}.
+
+\textbf{Rationale for Docker Usage:}
+\begin{itemize}
+    \item \textbf{Toolchain Compatibility:} The IREE compiler and LLVM RISC-V toolchain are primarily distributed as x86\_64 Linux binaries. Running these natively on macOS (ARM64) is non-trivial. Docker provides a standardized Linux environment.
+    \item \textbf{Architecture Translation:} Since the host is ARM64 and the toolchain is x86\_64, Docker Desktop on macOS utilizes \textbf{Rosetta 2} to translate the x86 container instructions to the host ARM silicon. 
+\end{itemize}
+
+\textbf{Emulation Stack:}
+The final execution involved a multi-layered translation stack, which significantly impacts performance profiling:
+\begin{enumerate}
+    \item \textbf{Target:} RISC-V Vector code (rv64gcv).
+    \item \textbf{Emulator:} QEMU User Mode (\texttt{qemu-riscv64}).
+    \item \textbf{Container:} Ubuntu 22.04 (x86\_64) running via Rosetta 2 translation.
+    \item \textbf{Host:} Apple M3 Pro (ARM64).
+\end{enumerate}
+
+\subsection{Model Pipeline}
+Models were sourced from the ONNX Model Zoo or exported from PyTorch. A custom preprocessing pipeline was established:
+\begin{itemize}
+    \item \textbf{Opset Standardization}: Models were upgraded to ONNX Opset 17 using \texttt{upgrade\_model.py}, with specific exceptions (e.g., MobileNetV2) where upgrading altered the graph structure and broke vectorization.
+    \item \textbf{Manual Definition (NiN)}: Due to the obsolescence of official repositories for Network in Network, the canonical ImageNet architecture was manually redefined in PyTorch and exported to ONNX to ensure compatibility.
+    \item \textbf{Compilation}: Each model was compiled twice using \texttt{iree-compile} to isolate the performance impact of vectorization.
+\end{itemize}
+
+\subsection{Compilation Strategy}
+We employed a two-pass compilation strategy to strictly isolate the impact of the vector backend.
+
+\textbf{1. Scalar Baseline (SISD):}
+The first pass utilized standard RISC-V extensions (\texttt{+m,+a,+f,+d}) to generate a generic 64-bit baseline. 
+\begin{itemize}
+    \item \texttt{+m, +a}: Enable hardware integer multiplication and atomic memory operations.
+    \item \texttt{+f, +d}: Enable single and double precision floating-point units.
+\end{itemize}
+
+\textbf{2. Vector Optimized (SIMD):}
+The second pass enabled the RISC-V Vector Extension (RVV) with the flags \texttt{+zvl512b,+v}.
+\begin{itemize}
+    \item \texttt{+v}: Enables the vector instruction set (e.g., \texttt{vle32.v}, \texttt{vfmacc}), allowing the CPU to use the 32 vector registers.
+    \item \texttt{+zvl512b}: Explicitly informs the compiler that the target hardware (QEMU) has a fixed vector length of \textbf{512 bits}. This allows the LLVM backend to perform optimal loop unrolling and register packing.
+\end{itemize}
+
+\section{Results}
+The benchmark results are summarized in Table~\ref{tab:Performance}. A clear dichotomy is observed: modern architectures successfully vectorized, while legacy models reverted to scalar execution.
+
+\begin{table}[ht]
+    \centering
+    \caption{Scalar vs. Vector Benchmarks.}
+    \vspace{2mm}
+    \resizebox{\linewidth}{!}{
+        \begin{tabular}{llrrr} 
+            \toprule
+            \textbf{Model} & \textbf{Type} & \textbf{Time} & \textbf{Mem} & \textbf{Instr} \\
+             & & (ms) & (KB) & (Vec) \\
+            \midrule
+            \multirow{2}{*}{MobileNet} & Scalar & 10,516 & 208,248 & 0 \\
+                                       & Vector & 104,727 & 459,160 & \textbf{307k} \\
+            \midrule
+            \multirow{2}{*}{SqueezeNet} & Scalar & 8,313 & 212,596 & 0 \\
+                                        & Vector & 100,169 & 464,632 & \textbf{286k} \\
+            \midrule
+            \multirow{2}{*}{TinyBERT}   & Scalar & 400 & 296,984 & 0 \\
+                                        & Vector & 64,720 & 393,332 & \textbf{18k} \\
+            \midrule
+            \multirow{2}{*}{AlexNet}    & Scalar & 120 & 22,612 & 0 \\
+                                        & Vector & 90 & 22,476 & 0 \\
+            \midrule
+            \multirow{2}{*}{NiN}        & Scalar & 370 & 64,928 & 0 \\
+                                        & Vector & 320 & 64,960 & 0 \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:Performance}
+\end{table}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{chart_instructions.png}
+    \caption{Vector Instruction Count. MobileNet and SqueezeNet show massive auto-vectorization success, while legacy models (AlexNet, NiN) fail completely.}
+    \label{fig:vectors}
+\end{figure}
+
+\subsection{Vector Utilization Analysis}
+\begin{description}[leftmargin=0pt,labelindent=0pt,style=nextline]
+
+  \item[\textbf{Success Cases}]
+  MobileNetV2 and SqueezeNet achieved high vector counts. This is attributed to their heavy use of $1\times1$ pointwise convolutions, which IREE lowers into regular, dense loops that map efficiently to vector instructions. TinyBERT also vectorized successfully due to its reliance on matrix multiplication primitives.
+
+  % --- UPDATED SECTION START ---
+  \item[\textbf{Zero-Vectorization Cases}]
+  AlexNet, CaffeNet, GoogleNet~\cite{googlenet}, and \textbf{Network in Network (NiN)} resulted in \textbf{0 vector instructions}. The failure of NiN is particularly notable. Although it uses modern $1\times1$ layers, its input layer uses a large $11\times11$ kernel with a stride of 4. This creates a ``strided'' memory pattern where the required data is not stored contiguously (next to each other) in memory.
+  
+  As documented in compiler literature~\cite{llvm_lattner}, the optimization backend uses a \textbf{Cost Model} to decide when to vectorize. For strided data, the CPU must perform expensive ``gather'' operations to collect scattered data into a single vector register. The compiler calculated that this overhead would actually make the code slower than the simple scalar version, so it rejected vectorization to preserve performance.
+  % --- UPDATED SECTION END ---
+
+\end{description}
+
+\section{Discussion}
+
+\subsection{Emulation Overhead \& Docker Analysis}
+A prominent anomaly is the significant slowdown of vector code compared to scalar code, as shown in Figure~\ref{fig:time}. This is an artifact of the complex emulation stack described in the Method section. QEMU must translate every complex 512-bit RISC-V vector instruction into hundreds of x86 instructions, which Rosetta 2 then translates to ARM64 micro-ops.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{chart_time.png}
+    \caption{Execution Time (Log Scale). The 10x slowdown in vector mode confirms heavy emulation overhead.}
+    \label{fig:time}
+\end{figure}
+
+The Docker resource monitor (Figure~\ref{fig:docker}) confirms that the workload is compute-bound. The distinct blue CPU spikes (reaching 400-1000\% usage) correspond to the multi-threaded translation engine struggling with vector workloads. Notably, the memory usage shows distinct "plateaus" where vector runs consume significantly more RAM than scalar runs.
+
+\begin{figure}[b!]
+    \centering
+    \includegraphics[width=\linewidth]{docker-usage.png}
+    \caption{Host Resource Usage. Blue spikes indicate high CPU load during QEMU vector emulation.}
+    \label{fig:docker}
+\end{figure}
+
+\subsection{Edge Suitability \& The Memory Wall}
+Based on the memory profiling results (Figure~\ref{fig:mem}), we can categorize the suitability of these models for different classes of edge hardware.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{chart_memory.png}
+    \caption{Memory Footprint. Vectorization introduces significant runtime memory overhead (Red bars).}
+    \label{fig:mem}
+\end{figure}
+
+\textbf{1. High-End Edge (e.g., Jetson Orin, RPi 5):} 
+Models like MobileNetV2 (requiring ~460 MB in Vector mode) are fully suitable. These devices typically feature 2GB+ of RAM, comfortably accommodating the runtime overhead.
+
+\textbf{2. Mid-Range Edge (e.g., RPi Zero 2 W):} 
+With typically 512MB of RAM, these devices are at the limit. Running MobileNetV2 (459 MB) leaves almost no room for the operating system. To deploy here, we would need to revert to the Scalar implementation (~208 MB).
+
+\textbf{3. Low-Power/Microcontrollers (e.g., STM32):} 
+None of the tested vector configurations are suitable. The ~400MB requirement far exceeds the SRAM limits (<1MB) of microcontrollers.
+
+\section{Conclusions}
+This study demonstrated that while modern architectures like MobileNet and Transformers map efficiently to the RISC-V Vector extension, they introduce a significant \textbf{Time-Space Tradeoff}. The current IREE implementation doubles the memory footprint to achieve vectorization. 
+
+To contextualize these results, Table~\ref{tab:sim_vs_silicon} highlights the fundamental differences between our experimental simulation and theoretical silicon performance. Future work should involve deployment on physical hardware (e.g., SiFive X280) to validate the expected 4x-8x performance gains masked by simulation overhead, specifically focusing on energy efficiency (TOPS/Watt) metrics which are critical for embedded deployment.
+
+\begin{table}[ht]
+    \centering
+    \caption{Simulation vs. Silicon Performance}
+    \resizebox{\linewidth}{!}{
+        \begin{tabular}{lcc}
+            \toprule
+            \textbf{Metric} & \textbf{QEMU (Current)} & \textbf{SiFive X280} \\
+            \midrule
+            \textbf{Execution} & Serial Emulation & Parallel Hardware \\
+            \textbf{Throughput} & 10x Slower & 4x-8x Faster \\
+            \textbf{CPU Load} & 100\% (Host) & Offloaded (NPU) \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:sim_vs_silicon}
+\end{table}
+
+\bibliography{references}
+\bibliographystyle{abbrv}
+
+\end{document}
